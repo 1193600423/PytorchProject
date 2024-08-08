@@ -1,6 +1,6 @@
 # PytorchProject
 
-### 运行结果如下
+### 运行结果
 
 ```angular2html
 Read Data Ready!
