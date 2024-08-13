@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
 from torchvision import datasets
@@ -26,13 +27,23 @@ class MyLSTM(nn.Module):
         return (Variable(torch.zeros(1, batch_size, self.hidden_dim).to(device)),
                 Variable(torch.zeros(1, batch_size, self.hidden_dim).to(device)))
 
-    def forward(self, input):  # 不可以自己显式调用，pytorch内部自带调用机制
+    def forward(self, input):
         # 重新初始化隐藏状态
         self.hidden = self.init_hidden(input.size(0))  # input.size(0)得到batch_size
-        lstm_out, self.hidden = self.lstm(input, self.hidden)
-        last_out = lstm_out[:, -1, :]  # 取出最后一个时间步的输出
-        out = self.fc(last_out)  # 经过全连接层
-        out = self.activ(out)  # 使用Sigmoid激活函数,输出值将被限制在[0, 1]之间
+        # lengths 是每个序列的实际长度，用于padding
+        lengths = get_lengths(input)
+        lengths = lengths.to(torch.int64)
+        lengths = lengths.cpu()
+        # Pack the padded sequence
+        packed_input = pack_padded_sequence(input, lengths, batch_first=True, enforce_sorted=False)
+        packed_output, self.hidden = self.lstm(packed_input, self.hidden)
+        # Unpack the packed sequence
+        lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True)
+        # Get the output from the last valid time step for each sequence
+        idx = (lengths - 1).view(-1, 1).expand(len(lengths), lstm_out.size(2)).unsqueeze(1).to(device)
+        last_out = lstm_out.gather(1, idx).squeeze(1)
+        out = self.fc(last_out)
+        out = self.activ(out)
         return out
 
 class TextDataset(Dataset):
@@ -53,6 +64,13 @@ class TextDataset(Dataset):
 
         return text, label
 
+def get_lengths(inputs):
+    # inputs shape: (batch_size, sequence_length, vector_size)
+    # 如果 padding 是全 0，则计算非零行的数量即为每个序列的长度
+    non_zero_mask = torch.sum(inputs, dim=2) != 0
+    # Count non-zero rows for each batch item
+    lengths = torch.sum(non_zero_mask, dim=1)
+    return lengths
 
 # 文本到向量的转换(Word2Vec)
 class TextToTensor:
@@ -153,7 +171,7 @@ def test(dataloader, model, loss_fn):  # 模型测试过程的定义，这个也
             pred = model(X)
             # print(torch.sigmoid(pred))
             test_loss += loss_fn(pred, y).item()
-            predicted_labels = (torch.sigmoid(pred) > 0.5).type(torch.float)
+            predicted_labels = (pred > 0.5).type(torch.float)
             correct += (predicted_labels == y).type(torch.float).sum().item()
     test_loss /= num_batches
     correct /= size
@@ -167,6 +185,15 @@ if __name__ == '__main__':
     epochs = 20 # 训练的轮数
     batch_size = 256 # 每次训练的样本数量
 
+    # 设备选择
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    print(f"Using {device} device")
 
     # 定义路径
     train_dir_path = f'G:/0Codes/nju_codes/24spr/LLM/DL24/DataSet/bbc/train'
@@ -184,7 +211,7 @@ if __name__ == '__main__':
     comments = train_dataset.data # comments = [train_dataset.data, test_dataset.data]
     common_texts = [preprocess_text(comment) for comment in comments]
 
-    # 构建Word2Vec模型，保存模型
+    # 构建 Word2Vec模型，保存模型
     tranModel = Word2Vec(sentences=common_texts, vector_size=vector_size, window=5, min_count=1, workers=4)
     tranModel.save('word2vec.model')
 
@@ -196,24 +223,14 @@ if __name__ == '__main__':
 
     # Create data loaders.这个也是标准用法，只要按照要求自定义数据集，就可以用标准的dataloader加载数据
     train_dataloader = DataLoader(training_data, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn)
-    test_dataloader = DataLoader(test_data, batch_size=32, shuffle=True, collate_fn=collate_fn)
+    test_dataloader = DataLoader(test_data, batch_size=32, collate_fn=collate_fn)
     print("Data Loader Ready!")
-
-    # 设备选择
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
-    print(f"Using {device} device")
 
     # 创建一个神经网络模型对象并将它移动到指定的设备
     model = MyLSTM(vector_size, hidden_dim).to(device)
 
-    loss_fn = nn.BCELoss()  # 损失函数
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)  # 优化器
+    loss_fn = nn.BCEWithLogitsLoss()  # 损失函数
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)  # 优化器
 
     # 下面这个训练和测试的过程也是标准形式，我们用自己的数据也还是这样去写
     for t in range(epochs):
