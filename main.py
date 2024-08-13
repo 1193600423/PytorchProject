@@ -28,17 +28,18 @@ class MyLSTM(nn.Module):
                 Variable(torch.zeros(1, batch_size, self.hidden_dim).to(device)))
 
     def forward(self, input):
+        input = input.to(device)
         # 重新初始化隐藏状态
         self.hidden = self.init_hidden(input.size(0))  # input.size(0)得到batch_size
         # lengths 是每个序列的实际长度，用于padding
-        lengths = get_lengths(input)
+        lengths = get_lengths(input).to(torch.int64).to('cpu')
         # Pack the padded sequence
         packed_input = pack_padded_sequence(input, lengths, batch_first=True, enforce_sorted=False)
         packed_output, self.hidden = self.lstm(packed_input, self.hidden)
         # Unpack the packed sequence
         lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True)
         # Get the output from the last valid time step for each sequence
-        idx = (lengths - 1).view(-1, 1).expand(len(lengths), lstm_out.size(2)).unsqueeze(1)
+        idx = (lengths - 1).view(-1, 1).expand(len(lengths), lstm_out.size(2)).unsqueeze(1).to(device)
         last_out = lstm_out.gather(1, idx).squeeze(1)
         out = self.fc(last_out)
         out = self.activ(out)
@@ -62,16 +63,6 @@ class TextDataset(Dataset):
 
         return text, label
 
-def get_lengths(inputs):
-    # inputs shape: (batch_size, sequence_length, vector_size)
-    # 如果 padding 是全 0，则计算非零行的数量即为每个序列的长度
-    non_zero_mask = torch.sum(inputs, dim=2) != 0
-    # Count non-zero rows for each batch item
-    lengths = torch.sum(non_zero_mask, dim=1)
-    lengths = lengths.to(device)
-    lengths = lengths.long()
-    return lengths
-
 # 文本到向量的转换(Word2Vec)
 class TextToTensor:
     def __call__(self, text):
@@ -86,7 +77,14 @@ class TextToTensor:
             vectors.append(torch.tensor(vector))
         return vectors
 
-#
+def get_lengths(inputs):
+    # inputs shape: (batch_size, sequence_length, vector_size)
+    # 如果 padding 是全 0，则计算非零行的数量即为每个序列的长度
+    non_zero_mask = torch.sum(inputs, dim=2) != 0
+    # Count non-zero rows for each batch item
+    lengths = torch.sum(non_zero_mask, dim=1)
+    return lengths
+
 def read_data(root_dir):
     data = []
     labels = []
@@ -146,16 +144,13 @@ def train(dataloader, model, loss_fn, optimizer):  # 模型训练过程的定义
     for batch, (X, y) in enumerate(dataloader):  # 这里是dataloader的迭代器，每次迭代都会返回一个batch的数据
         # Compute prediction and loss
         X, y = X.to(device), y.to(device) # 把数据放到GPU上
-
         # Compute prediction error
         pred = model(X) # 这里是模型预测
         loss = loss_fn(pred, y)  # 计算loss
-
         # Backpropagation
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-
         if batch % 100 == 0:
             loss, current = loss.item(), (batch + 1) * len(X)
             print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
@@ -189,7 +184,7 @@ def test(dataloader, model, loss_fn):  # 模型测试过程的定义，这个也
             pred = model(X)
             # print(torch.sigmoid(pred))
             test_loss += loss_fn(pred, y).item()
-            predicted_labels = (torch.sigmoid(pred) > 0.5).type(torch.float)
+            predicted_labels = (pred > 0.5).type(torch.float)
             correct += (predicted_labels == y).type(torch.float).sum().item()
     test_loss /= num_batches
     correct /= size
@@ -227,7 +222,7 @@ if __name__ == '__main__':
     print("Read Data Ready!")
     # 生成词典 common_texts
     train_dataset = TextDataset(train_data, train_labels)
-    train_dataset = TextDataset(train_data, train_labels)
+    eval_dataset = TextDataset(eval_data, eval_labels)
     test_dataset = TextDataset(test_data, test_labels)
     comments = train_dataset.data # comments = [train_dataset.data, test_dataset.data]
     common_texts = [preprocess_text(comment) for comment in comments]
@@ -244,15 +239,15 @@ if __name__ == '__main__':
     print("Data Set Ready!")
 
     # Create data loaders.这个也是标准用法，只要按照要求自定义数据集，就可以用标准的dataloader加载数据
-    train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn).to(device)
-    eval_dataloader = DataLoader(eval_data, batch_size=32, shuffle=True, collate_fn=collate_fn).to(device)
-    test_dataloader = DataLoader(test_data, batch_size=32, shuffle=True, collate_fn=collate_fn).to(device)
+    train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn)
+    eval_dataloader = DataLoader(eval_data, batch_size=32, collate_fn=collate_fn)
+    test_dataloader = DataLoader(test_data, batch_size=64, collate_fn=collate_fn)
     print("Data Loader Ready!")
 
     # 创建一个神经网络模型对象并将它移动到指定的设备
     model = MyLSTM(vector_size, hidden_dim).to(device)
 
-    loss_fn = nn.BCELoss()  # 损失函数
+    loss_fn = nn.BCEWithLogitsLoss()  # 损失函数
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)  # 优化器
 
     # 下面这个训练和测试的过程也是标准形式，我们用自己的数据也还是这样去写
