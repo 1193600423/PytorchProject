@@ -194,7 +194,7 @@ def test(dataloader, model, loss_fn):  # 模型测试过程的定义，这个也
 if __name__ == '__main__':
     # 超参数
     vector_size = 128# 定义词向量长度
-    hidden_dim = 64 # 隐藏层维度
+    hidden_dim = 128 # 隐藏层维度
     epochs = 10 # 训练的轮数
     batch_size = 256 # 每次训练的样本数量
 
