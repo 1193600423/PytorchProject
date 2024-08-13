@@ -32,15 +32,13 @@ class MyLSTM(nn.Module):
         self.hidden = self.init_hidden(input.size(0))  # input.size(0)得到batch_size
         # lengths 是每个序列的实际长度，用于padding
         lengths = get_lengths(input)
-        lengths = lengths.to(torch.int64)
-        lengths = lengths.cpu()
         # Pack the padded sequence
         packed_input = pack_padded_sequence(input, lengths, batch_first=True, enforce_sorted=False)
         packed_output, self.hidden = self.lstm(packed_input, self.hidden)
         # Unpack the packed sequence
         lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True)
         # Get the output from the last valid time step for each sequence
-        idx = (lengths - 1).view(-1, 1).expand(len(lengths), lstm_out.size(2)).unsqueeze(1).to(device)
+        idx = (lengths - 1).view(-1, 1).expand(len(lengths), lstm_out.size(2)).unsqueeze(1)
         last_out = lstm_out.gather(1, idx).squeeze(1)
         out = self.fc(last_out)
         out = self.activ(out)
@@ -70,6 +68,8 @@ def get_lengths(inputs):
     non_zero_mask = torch.sum(inputs, dim=2) != 0
     # Count non-zero rows for each batch item
     lengths = torch.sum(non_zero_mask, dim=1)
+    lengths = lengths.to(device)
+    lengths = lengths.long()
     return lengths
 
 # 文本到向量的转换(Word2Vec)
@@ -160,6 +160,24 @@ def train(dataloader, model, loss_fn, optimizer):  # 模型训练过程的定义
             loss, current = loss.item(), (batch + 1) * len(X)
             print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
 
+# 验证函数
+def eval(dataloader, model, loss_fn):
+    size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    model.eval()  # 设置模型为评估模式
+    val_loss, correct = 0, 0
+    with torch.no_grad():  # 不计算梯度
+        for X, y in dataloader:
+            X, y = X.to(device), y.to(device)  # 将数据转移到GPU（如果可用）
+            pred = model(X)
+            val_loss += loss_fn(pred, y).item()  # 计算损失
+            predicted_labels = (pred > 0.5).type(torch.float)  # 二分类情况下的阈值
+            correct += (predicted_labels == y).type(torch.float).sum().item()  # 计算准确率
+    val_loss /= num_batches  # 计算平均损失
+    val_accuracy = correct / size  # 计算准确率
+    print(f"Validation Error: \n Accuracy: {(100 * val_accuracy):>0.1f}%, Avg loss: {val_loss:>8f} \n")
+
+# 测试函数
 def test(dataloader, model, loss_fn):  # 模型测试过程的定义，这个也是模板，以后可以借鉴
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
@@ -171,7 +189,7 @@ def test(dataloader, model, loss_fn):  # 模型测试过程的定义，这个也
             pred = model(X)
             # print(torch.sigmoid(pred))
             test_loss += loss_fn(pred, y).item()
-            predicted_labels = (pred > 0.5).type(torch.float)
+            predicted_labels = (torch.sigmoid(pred) > 0.5).type(torch.float)
             correct += (predicted_labels == y).type(torch.float).sum().item()
     test_loss /= num_batches
     correct /= size
@@ -181,8 +199,8 @@ def test(dataloader, model, loss_fn):  # 模型测试过程的定义，这个也
 if __name__ == '__main__':
     # 超参数
     vector_size = 128# 定义词向量长度
-    hidden_dim = 128 # 隐藏层维度
-    epochs = 20 # 训练的轮数
+    hidden_dim = 64 # 隐藏层维度
+    epochs = 10 # 训练的轮数
     batch_size = 256 # 每次训练的样本数量
 
     # 设备选择
@@ -197,15 +215,18 @@ if __name__ == '__main__':
 
     # 定义路径
     train_dir_path = f'G:/0Codes/nju_codes/24spr/LLM/DL24/DataSet/bbc/train'
+    eval_dir_path = f'G:/0Codes/nju_codes/24spr/LLM/DL24/DataSet/bbc/eval'
     test_dir_path = f'G:/0Codes/nju_codes/24spr/LLM/DL24/DataSet/bbc/test'
     # 获取英语停用词列表
     stop_words = set(stopwords.words('english'))
 
     # 读取数据
     (train_data, train_labels) = read_data(train_dir_path)
+    (eval_data, eval_labels) = read_data(eval_dir_path)
     (test_data, test_labels) = read_data(test_dir_path)
     print("Read Data Ready!")
     # 生成词典 common_texts
+    train_dataset = TextDataset(train_data, train_labels)
     train_dataset = TextDataset(train_data, train_labels)
     test_dataset = TextDataset(test_data, test_labels)
     comments = train_dataset.data # comments = [train_dataset.data, test_dataset.data]
@@ -217,50 +238,33 @@ if __name__ == '__main__':
 
     # 将每一个评论转换为词向量的数组，创建数据集
     text_to_tensor = TextToTensor()
-    training_data = TextDataset(train_data, train_labels, transform=text_to_tensor)
+    train_data = TextDataset(train_data, train_labels, transform=text_to_tensor)
+    eval_data = TextDataset(eval_data, eval_labels, transform=text_to_tensor)
     test_data = TextDataset(test_data, test_labels, transform=text_to_tensor)
     print("Data Set Ready!")
 
     # Create data loaders.这个也是标准用法，只要按照要求自定义数据集，就可以用标准的dataloader加载数据
-    train_dataloader = DataLoader(training_data, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn)
-    test_dataloader = DataLoader(test_data, batch_size=32, collate_fn=collate_fn)
+    train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn).to(device)
+    eval_dataloader = DataLoader(eval_data, batch_size=32, shuffle=True, collate_fn=collate_fn).to(device)
+    test_dataloader = DataLoader(test_data, batch_size=32, shuffle=True, collate_fn=collate_fn).to(device)
     print("Data Loader Ready!")
 
     # 创建一个神经网络模型对象并将它移动到指定的设备
     model = MyLSTM(vector_size, hidden_dim).to(device)
 
-    loss_fn = nn.BCEWithLogitsLoss()  # 损失函数
+    loss_fn = nn.BCELoss()  # 损失函数
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)  # 优化器
 
     # 下面这个训练和测试的过程也是标准形式，我们用自己的数据也还是这样去写
     for t in range(epochs):
         print(f"Epoch {t + 1}\n-------------------------------")
         train(train_dataloader, model, loss_fn, optimizer)
-        test(test_dataloader, model, loss_fn)
+        eval(eval_dataloader, model, loss_fn)
     print("Done!")
 
     # 模型可以保存下来，这里model文件夹要和当前py文件在同一个目录下
     torch.save(model.state_dict(), "model/lstm")
     print("Saved PyTorch Model State to the project root folder!")
 
-    classes = [
-        "T-shirt/top",
-        "Trouser",
-        "Pullover",
-        "Dress",
-        "Coat",
-        "Sandal",
-        "Shirt",
-        "Sneaker",
-        "Bag",
-        "Ankle boot",
-    ]
-
-    # 使用已训练好的模型对一组测试数据进行预测，并打印出预测值和实际值。
-    # model.eval()
-    # x, y = test_data[0][0], test_data[0][1]
-    # with torch.no_grad():
-    #     x = x.to(device)
-    #     pred = model(x)
-    #     predicted, actual = classes[pred[0].argmax(0)], classes[y]
-    #     print(f'Predicted: "{predicted}", Actual: "{actual}"')
+    print("Testing-------------------------------")
+    test(test_dataloader, model, loss_fn)
